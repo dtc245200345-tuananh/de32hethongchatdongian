@@ -4,14 +4,22 @@
   "description": "De 32 - Real-time chat application",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test --test-concurrency=1",
+    "test:docker": "node scripts/verify-docker.js",
+    "test:monitoring": "node scripts/verify-monitoring.js",
+    "test:logging": "node scripts/verify-logging.js"
   },
   "dependencies": {
     "@prometheus-io/client": "^0.16.1",
     "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^10.0.0",
     "express": "^4.21.2",
     "express-session": "^1.18.1",
     "pg": "^8.13.1",
     "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
   }
 }

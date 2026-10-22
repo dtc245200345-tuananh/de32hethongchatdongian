@@ -19,6 +19,8 @@ services:
 
   app:
     build: ./
+    labels:
+      de32.logging: "true"
     restart: unless-stopped
     environment:
       SESSION_SECRET: "${SESSION_SECRET:?Please set SESSION_SECRET in .env}"
@@ -26,19 +28,56 @@ services:
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_NAME: chatdb
-      DB_USER: chatuser
-      DB_PASSWORD: "${DB_PASSWORD:?Please set DB_PASSWORD in .env}"
+      DB_USER: chat_runtime
+      DB_PASSWORD_FILE: /run/secrets/app_runtime_password
+    secrets: [app_runtime_password]
     depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "3000:3000"
+      postgres-runtime-role-init:
+        condition: service_completed_successfully
+    expose:
+      - "3000"
     networks:
       - frontend
       - backend
 
+  postgres-runtime-role-init:
+    image: postgres:16
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: chatuser
+      PGDATABASE: chatdb
+      PGPASSWORD: "${DB_PASSWORD:?Please set DB_PASSWORD in .env}"
+    secrets: [app_runtime_password]
+    volumes:
+      - ./scripts/postgres-runtime-role.sql:/setup/postgres-runtime-role.sql:ro
+    command: ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-f", "/setup/postgres-runtime-role.sql"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  pgadmin:
+    image: dpage/pgadmin4:9.18.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@de32.com
+      PGADMIN_DEFAULT_PASSWORD_FILE: /run/secrets/pgadmin_admin_password
+      PGADMIN_DISABLE_POSTFIX: "true"
+    secrets: [pgadmin_admin_password]
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend, pgadmin_access]
+
   nginx:
     image: nginx:alpine
+    labels:
+      de32.logging: "true"
     restart: unless-stopped
     ports:
       - "8080:80"
@@ -50,38 +89,150 @@ services:
       - frontend
 
   prometheus:
-    image: prom/prometheus:latest
+    profiles: [monitoring]
+    image: prom/prometheus:v3.5.0
     restart: unless-stopped
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=7d"]
     depends_on:
       - app
     networks:
       - frontend
       - backend
+      - monitoring
 
   grafana:
-    image: grafana/grafana:latest
+    profiles: [monitoring]
+    image: grafana/grafana:12.1.1
     restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    secrets: [grafana_admin_password]
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     networks:
       - frontend
+      - logging
+
+  postgres-metrics-init:
+    profiles: [monitoring]
+    image: postgres:16
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: chatuser
+      PGDATABASE: chatdb
+      PGPASSWORD: "${DB_PASSWORD:?Please set DB_PASSWORD in .env}"
+    secrets: [postgres_exporter_password]
+    volumes:
+      - ./monitoring/postgres-init.sql:/setup/postgres-init.sql:ro
+    command: ["psql", "-f", "/setup/postgres-init.sql"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  postgres-exporter:
+    profiles: [monitoring]
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: postgres:5432/chatdb?sslmode=disable
+      DATA_SOURCE_USER: chat_metrics
+      DATA_SOURCE_PASS_FILE: /run/secrets/postgres_exporter_password
+    secrets: [postgres_exporter_password]
+    command: ["--config.file=/etc/postgres_exporter.yml"]
+    volumes:
+      - ./monitoring/postgres-exporter.yml:/etc/postgres_exporter.yml:ro
+    depends_on:
+      postgres-metrics-init:
+        condition: service_completed_successfully
+    networks: [backend]
+
+  nginx-exporter:
+    profiles: [monitoring]
+    image: nginx/nginx-prometheus-exporter:1.4.2
+    restart: unless-stopped
+    command: ["--nginx.scrape-uri=http://nginx:8081/stub_status"]
+    depends_on: [nginx]
+    networks: [frontend]
+
+  cadvisor:
+    profiles: [monitoring]
+    image: ghcr.io/google/cadvisor:0.54.0
+    restart: unless-stopped
+    privileged: true
+    command: ["--docker_only=true", "--containerd=/containerd/containerd.sock", "--housekeeping_interval=10s", "--store_container_labels=false", "--whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/containerd:/containerd:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    networks: [monitoring]
+
+  loki:
+    profiles: [monitoring]
+    image: grafana/loki:3.5.1
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    networks: [logging]
+
+  promtail:
+    profiles: [monitoring]
+    image: grafana/promtail:3.5.0
+    restart: unless-stopped
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail_data:/var/lib/promtail
+    depends_on: [loki]
+    networks: [logging]
 
 
 volumes:
   postgres_data:
+  pgadmin_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  promtail_data:
 
 networks:
   frontend:
   backend:
     internal: true
+  pgadmin_access:
+  monitoring:
+    internal: true
+  logging:
+    internal: true
+
+secrets:
+  app_runtime_password:
+    file: ./.secrets/app_runtime_password
+  pgadmin_admin_password:
+    file: ./.secrets/pgadmin_admin_password
+  grafana_admin_password:
+    file: ./.secrets/grafana_admin_password
+  postgres_exporter_password:
+    file: ./.secrets/postgres_exporter_password

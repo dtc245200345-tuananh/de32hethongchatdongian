@@ -1,0 +1,2 @@
+# Single database exporter; credentials are supplied via Docker secret, not YAML.
+auth_modules: {}

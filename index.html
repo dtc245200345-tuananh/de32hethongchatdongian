@@ -80,6 +80,11 @@
     <input id="room" value="phong-chung" maxlength="100">
     <button id="join">Tham gia phòng</button>
 
+    <p>Phòng mới chỉ dành cho chủ phòng và thành viên. Phòng dữ liệu cũ là phòng chung.</p>
+    <form id="inviteForm">
+      <input id="inviteUsername" placeholder="Tên tài khoản cần thêm" required maxlength="50">
+      <button type="submit">Thêm thành viên</button>
+    </form>
     <div id="messages"></div>
 
     <form id="form">
@@ -161,7 +166,7 @@
       socket.on("connect", () => {
         showStatus("Đã kết nối máy chủ.");
         if (currentRoom) {
-          socket.emit("join-room", currentRoom);
+          joinRoom(currentRoom);
         }
       });
 
@@ -169,7 +174,13 @@
         showStatus("Không thể kết nối. Hãy đăng nhập lại.", true);
       });
 
-      socket.on("disconnect", () => {
+      socket.on("disconnect", (reason) => {
+        if (reason === "io server disconnect") {
+          currentRoom = "";
+          messages.replaceChildren();
+          showLogin();
+          return;
+        }
         showStatus("Mất kết nối máy chủ.");
       });
 
@@ -249,10 +260,7 @@
         return;
       }
 
-      currentRoom = room;
-      messages.replaceChildren();
-      socket.emit("join-room", room);
-      showStatus("Đang tham gia phòng: " + room);
+      joinRoom(room);
     });
 
     document.getElementById("form").addEventListener("submit",
@@ -266,15 +274,32 @@
           return;
         }
 
-        socket.emit("chat-message", {
+      const draft = messageInput.value;
+      socket.timeout(5000).emit("chat-message", {
           room: currentRoom,
           message
-        });
-
-        messageInput.value = "";
+      }, (error, result) => {
+        if (error || !result?.ok) return showStatus(result?.error || "Chưa xác nhận gửi; kiểm tra lịch sử trước khi gửi lại.", true);
+        if (messageInput.value === draft) messageInput.value = "";
+      });
       }
     );
 
+    function joinRoom(room) {
+      socket.timeout(5000).emit("join-room", room, (error, result) => {
+        if (error || !result?.ok) return showStatus(result?.error || "Không thể vào phòng.", true);
+        currentRoom = result.room;
+        showStatus("Đang ở phòng: " + currentRoom);
+      });
+    }
+    document.getElementById("inviteForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      if (!currentRoom) return showStatus("Hãy tham gia phòng trước.", true);
+      try {
+        await api("/api/rooms/members", { room: currentRoom, username: document.getElementById("inviteUsername").value });
+        showStatus("Đã thêm thành viên.");
+      } catch (error) { showStatus(error.message, true); }
+    });
     async function initialize() {
       try {
         const response = await fetch("/api/me");

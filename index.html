@@ -1,0 +1,296 @@
+
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đề 32 - Hệ thống Chat</title>
+  <style>
+    body {
+      max-width: 700px;
+      margin: 40px auto;
+      padding: 0 16px;
+      font-family: Arial, sans-serif;
+    }
+
+    input, button {
+      box-sizing: border-box;
+      padding: 10px;
+      margin: 4px 0;
+    }
+
+    input { max-width: 100%; }
+    #messages {
+      height: 300px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 12px;
+      margin: 16px 0;
+    }
+
+    #message { width: 70%; }
+    .panel {
+      border: 1px solid #ddd;
+      padding: 16px;
+      margin: 16px 0;
+      border-radius: 8px;
+    }
+
+    .hidden { display: none; }
+    .error { color: #b00020; }
+    .meta { color: #666; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <h1>Đề 32 — Hệ thống Chat</h1>
+  <p id="status">Đang khởi tạo...</p>
+
+  <section id="auth" class="panel hidden">
+    <h2>Tài khoản</h2>
+
+    <form id="loginForm">
+      <h3>Đăng nhập</h3>
+      <input id="loginUsername" placeholder="Tên đăng nhập"
+             minlength="3" maxlength="50" required>
+      <input id="loginPassword" type="password"
+             placeholder="Mật khẩu" required>
+      <button type="submit">Đăng nhập</button>
+    </form>
+
+    <hr>
+
+    <form id="registerForm">
+      <h3>Đăng ký</h3>
+      <input id="registerUsername" placeholder="Tên đăng nhập"
+             minlength="3" maxlength="50" required>
+      <input id="registerPassword" type="password"
+             placeholder="Mật khẩu (ít nhất 8 ký tự)"
+             minlength="8" maxlength="72" required>
+      <button type="submit">Tạo tài khoản</button>
+    </form>
+  </section>
+
+  <section id="chat" class="hidden">
+    <p>Đang đăng nhập với tài khoản:
+      <strong id="currentUser"></strong>
+      <button id="logout">Đăng xuất</button>
+    </p>
+
+    <label for="room">Phòng chat:</label>
+    <input id="room" value="phong-chung" maxlength="100">
+    <button id="join">Tham gia phòng</button>
+
+    <div id="messages"></div>
+
+    <form id="form">
+      <input id="message" placeholder="Nhập tin nhắn..."
+             maxlength="2000" required>
+      <button type="submit">Gửi</button>
+    </form>
+  </section>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const status = document.getElementById("status");
+    const auth = document.getElementById("auth");
+    const chat = document.getElementById("chat");
+    const messages = document.getElementById("messages");
+    const roomInput = document.getElementById("room");
+    const messageInput = document.getElementById("message");
+
+    let socket = null;
+    let currentRoom = "";
+
+    function showStatus(message, isError = false) {
+      status.textContent = message;
+      status.className = isError ? "error" : "";
+    }
+
+    function showChat(user) {
+      auth.classList.add("hidden");
+      chat.classList.remove("hidden");
+      document.getElementById("currentUser").textContent = user.username;
+      connectSocket();
+    }
+
+    function showLogin() {
+      chat.classList.add("hidden");
+      auth.classList.remove("hidden");
+      showStatus("Vui lòng đăng nhập hoặc tạo tài khoản.");
+    }
+
+    async function api(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "Có lỗi xảy ra.");
+      }
+
+      return result;
+    }
+
+    function renderMessage(data) {
+      const item = document.createElement("p");
+      const author = document.createElement("strong");
+      const content = document.createElement("span");
+      const time = document.createElement("small");
+
+      author.textContent = (data.username || "Tài khoản cũ") + ": ";
+      content.textContent = data.message;
+      time.textContent = " [" +
+        new Date(data.created_at).toLocaleString("vi-VN") + "]";
+      time.className = "meta";
+
+      item.append(author, content, time);
+      messages.appendChild(item);
+    }
+
+    function connectSocket() {
+      if (socket) {
+        socket.disconnect();
+      }
+
+      socket = io({ autoConnect: false });
+
+      socket.on("connect", () => {
+        showStatus("Đã kết nối máy chủ.");
+        if (currentRoom) {
+          socket.emit("join-room", currentRoom);
+        }
+      });
+
+      socket.on("connect_error", () => {
+        showStatus("Không thể kết nối. Hãy đăng nhập lại.", true);
+      });
+
+      socket.on("disconnect", () => {
+        showStatus("Mất kết nối máy chủ.");
+      });
+
+      socket.on("chat-history", (history) => {
+        messages.replaceChildren();
+        history.forEach(renderMessage);
+        messages.scrollTop = messages.scrollHeight;
+      });
+
+      socket.on("chat-message", (data) => {
+        renderMessage(data);
+        messages.scrollTop = messages.scrollHeight;
+      });
+
+      socket.on("chat-error", (message) => {
+        showStatus(message, true);
+      });
+
+      socket.connect();
+    }
+
+    document.getElementById("loginForm").addEventListener("submit",
+      async (event) => {
+        event.preventDefault();
+
+        try {
+          const result = await api("/api/login", {
+            username: document.getElementById("loginUsername").value,
+            password: document.getElementById("loginPassword").value
+          });
+
+          showChat(result.user);
+        } catch (error) {
+          showStatus(error.message, true);
+        }
+      }
+    );
+
+    document.getElementById("registerForm").addEventListener("submit",
+      async (event) => {
+        event.preventDefault();
+
+        try {
+          const result = await api("/api/register", {
+            username: document.getElementById("registerUsername").value,
+            password: document.getElementById("registerPassword").value
+          });
+
+          showChat(result.user);
+        } catch (error) {
+          showStatus(error.message, true);
+        }
+      }
+    );
+
+    document.getElementById("logout").addEventListener("click",
+      async () => {
+        try {
+          if (socket) socket.disconnect();
+
+          await api("/api/logout", {});
+          socket = null;
+          currentRoom = "";
+          messages.replaceChildren();
+          showLogin();
+        } catch (error) {
+          showStatus(error.message, true);
+        }
+      }
+    );
+
+    document.getElementById("join").addEventListener("click", () => {
+      const room = roomInput.value.trim();
+
+      if (!room || room.length > 100 || !socket?.connected) {
+        showStatus("Tên phòng không hợp lệ hoặc chưa kết nối.", true);
+        return;
+      }
+
+      currentRoom = room;
+      messages.replaceChildren();
+      socket.emit("join-room", room);
+      showStatus("Đang tham gia phòng: " + room);
+    });
+
+    document.getElementById("form").addEventListener("submit",
+      (event) => {
+        event.preventDefault();
+
+        const message = messageInput.value.trim();
+
+        if (!currentRoom || !message || !socket?.connected) {
+          showStatus("Hãy tham gia phòng chat trước.", true);
+          return;
+        }
+
+        socket.emit("chat-message", {
+          room: currentRoom,
+          message
+        });
+
+        messageInput.value = "";
+      }
+    );
+
+    async function initialize() {
+      try {
+        const response = await fetch("/api/me");
+        const result = await response.json();
+
+        if (result.user) {
+          showChat(result.user);
+        } else {
+          showLogin();
+        }
+      } catch (error) {
+        showStatus("Không thể kết nối máy chủ.", true);
+      }
+    }
+
+    initialize();
+  </script>
+</body>
+</html>
